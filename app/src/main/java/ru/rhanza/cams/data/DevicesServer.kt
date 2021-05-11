@@ -14,9 +14,13 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentSkipListSet
+import java.util.concurrent.TimeUnit
 
 interface DevicesServer {
     val devices: Flow<List<Device>>
+    val state: Flow<Boolean>
 
     suspend fun takePhoto(device: Device): Bitmap
     suspend fun connect(): Boolean
@@ -40,6 +44,16 @@ object DeviceServerImpl : DevicesServer {
         .serverPort(8883)
         .sslWithDefaultConfig()
         .useMqttVersion5()
+        .automaticReconnect()
+        .initialDelay(3, TimeUnit.SECONDS)
+        .maxDelay(10, TimeUnit.SECONDS)
+        .applyAutomaticReconnect()
+        .addConnectedListener {
+            _state.value = true
+        }
+        .addDisconnectedListener {
+            _state.value = false
+        }
         .simpleAuth(
             MqttSimpleAuthBuilder.Default()
                 .username(Secret.username)
@@ -48,7 +62,36 @@ object DeviceServerImpl : DevicesServer {
         )
         .buildBlocking()
 
-    private val devicesSet: MutableSet<Device> = mutableSetOf()
+    private val devicesSet: MutableSet<Device> = Collections.newSetFromMap(ConcurrentHashMap())
+
+    override val devices: Flow<List<Device>>
+        get() = callbackFlow {
+            client.toAsync()
+                .subscribeWith()
+                .topicFilter(STATUS_TOPIC)
+                .callback { publish ->
+                    val isOnline = String(publish.payloadAsBytes).toBoolean()
+                    val deviceName = publish.topic.levels.last()
+                    val device = Device(deviceName)
+                    if (isOnline) {
+                        devicesSet.add(device)
+                    } else {
+                        devicesSet.remove(device)
+                    }
+                    trySendBlocking(devicesSet.sortedBy { it.name })
+                }
+                .send()
+
+            awaitClose {
+                client.toAsync()
+                    .unsubscribeWith()
+                    .topicFilter(STATUS_TOPIC)
+                    .send()
+            }
+        }
+
+    private val _state: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    override val state: Flow<Boolean> = _state
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         try {
@@ -61,6 +104,7 @@ object DeviceServerImpl : DevicesServer {
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         client.disconnect()
+        _state.value = false
     }
 
     override suspend fun takePhoto(device: Device) =
@@ -95,33 +139,6 @@ object DeviceServerImpl : DevicesServer {
             continuation.invokeOnCancellation {
                 client.toAsync().unsubscribeWith()
                     .topicFilter(PHOTO_TOPIC_PREFIX + device.name)
-            }
-        }
-
-    override val devices: Flow<List<Device>>
-        get() = callbackFlow {
-            client.toAsync()
-                .subscribeWith()
-                .topicFilter(STATUS_TOPIC)
-                .callback { publish ->
-                    val isOnline = String(publish.payloadAsBytes).toBoolean()
-                    val deviceName = publish.topic.levels.last()
-                    val device = Device(deviceName)
-                    if (isOnline) {
-                        devicesSet.add(device)
-                    } else {
-                        devicesSet.remove(device)
-                    }
-
-                    trySendBlocking(devicesSet.sortedBy { it.name })
-                }
-                .send()
-
-            awaitClose {
-                client.toAsync()
-                    .unsubscribeWith()
-                    .topicFilter(STATUS_TOPIC)
-                    .send()
             }
         }
 }

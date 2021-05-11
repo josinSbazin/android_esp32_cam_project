@@ -31,24 +31,45 @@ class MainActivity : AppCompatActivity() {
         devicesServer = DevicesServer.get()
 
         lifecycleScope.launch {
-            binding.connectionStatus.text = "Connecting"
-            binding.progress.isVisible = true
-            if (devicesServer.connect()) {
-                binding.connectionStatus.text = "Connected"
-            } else {
-                binding.connectionStatus.text = "Connecting error!"
-            }
-            binding.progress.isVisible = false
-            devicesServer.devices.collect {
-                adapter.submitList(it)
-            }
+            connect()
+        }
+
+        lifecycleScope.launch {
+
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        GlobalScope.launch {
-            devicesServer.disconnect();
+        lifecycleScope.launch {
+            devicesServer.disconnect()
+        }
+    }
+
+    private suspend fun connect() {
+        binding.connectionStatus.text = "Connecting"
+        binding.progress.isVisible = true
+
+        if (!devicesServer.connect()) {
+            binding.connectionStatus.text = "Connecting error!"
+            binding.progress.isVisible = false
+        }
+
+        lifecycleScope.launch {
+            devicesServer.state.collect {
+                if (it) {
+                    binding.connectionStatus.text = "Connected"
+                } else {
+                    binding.connectionStatus.text = "Disconnected or reconnecting"
+                }
+                binding.progress.isVisible = false
+            }
+        }
+
+        lifecycleScope.launch {
+            devicesServer.devices.collect {
+                adapter.submitList(it)
+            }
         }
     }
 }
